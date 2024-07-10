@@ -1,0 +1,270 @@
+extern crate rand;
+extern crate rayon;
+
+use std::sync::{Arc, Mutex, Barrier};
+use std::collections::VecDeque;
+use std::time::{Instant, Duration};
+use rand::Rng;
+use rayon::prelude::*;
+use std::thread;
+
+const SCREEN_WIDTH: usize = 64;
+const SCREEN_HEIGHT: usize = 32;
+
+// GPU Command to set or clear a pixel
+#[derive(Clone, Copy)]
+struct GPUCommand {
+    x: usize,
+    y: usize,
+    set: bool,
+}
+
+// Framebuffer representing the Chip-8 screen
+type Framebuffer = [[bool; SCREEN_HEIGHT]; SCREEN_WIDTH];
+
+// Struct to manage GPU state, including framebuffer and command buffer
+struct Chip8GPU {
+    framebuffer: Arc<Mutex<Framebuffer>>,
+    command_buffer: Arc<Mutex<VecDeque<GPUCommand>>>, // Using VecDeque for FIFO
+    barrier: Arc<Barrier>, // Barrier to synchronize CPU and GPU
+}
+
+impl Chip8GPU {
+    fn new(barrier: Arc<Barrier>) -> Self {
+        Chip8GPU {
+            framebuffer: Arc::new(Mutex::new([[false; SCREEN_HEIGHT]; SCREEN_WIDTH])),
+            command_buffer: Arc::new(Mutex::new(VecDeque::new())),
+            barrier,
+        }
+    }
+
+    // Method to execute commands in parallel using Rayon
+    fn execute_commands(&self) {
+        // Collect all commands in FIFO order
+        let commands: Vec<GPUCommand> = {
+            let mut command_buffer = self.command_buffer.lock().unwrap();
+            command_buffer.drain(..).collect() // Collecting maintains FIFO order
+        };
+
+        // Execute commands in parallel
+        commands.into_par_iter().for_each(|command| {
+            if command.x < SCREEN_WIDTH && command.y < SCREEN_HEIGHT {
+                let mut framebuffer = self.framebuffer.lock().unwrap();
+                framebuffer[command.x][command.y] = command.set;
+            }
+        });
+
+        // Simulate GPU work
+        println!("GPU executed commands");
+
+        // Synchronize with CPU using barrier after execution
+        self.barrier.wait();
+    }
+
+    // Method to push a command to the buffer
+    fn push_command(&self, command: GPUCommand) {
+        self.command_buffer.lock().unwrap().push_back(command); // FIFO: push to the back
+    }
+}
+
+fn main() {
+    let barrier = Arc::new(Barrier::new(2)); // Create a barrier for synchronization
+    let gpu = Arc::new(Chip8GPU::new(barrier.clone()));
+
+    // Pushing some random commands
+    for _ in 0..10000 {
+        let rngx: u8 = rand::thread_rng().gen_range(0..64);
+        let rngy: u8 = rand::thread_rng().gen_range(0..32);
+
+        gpu.push_command(GPUCommand { x: rngx as usize, y: rngy as usize, set: true });
+    }
+
+    // Simulate CPU work before GPU execution
+    println!("CPU is preparing tasks before GPU execution...");
+    thread::sleep(Duration::from_millis(3)); // Simulate CPU work with 3 milliseconds delay
+
+    let timer = Instant::now();
+
+    // Spawn a thread for GPU execution
+    let gpu_thread = {
+        let gpu = Arc::clone(&gpu);
+        thread::spawn(move || {
+            gpu.execute_commands();
+        })
+    };
+
+    // Wait for GPU to finish execution
+    barrier.wait();
+    println!("CPU waiting for GPU to finish");
+
+    // Simulate more CPU work after GPU execution
+    println!("CPU performing additional tasks after GPU execution...");
+    thread::sleep(Duration::from_millis(1)); // Simulate more CPU work with 1 millisecond delay
+
+    // Measure execution time
+    // Join GPU thread to ensure it completes before continuing
+    gpu_thread.join().unwrap();
+
+    println!("Execution Time: {:?}ms", timer.elapsed().as_millis());
+
+    // Example: Print framebuffer contents (for demonstration)
+    let framebuffer = gpu.framebuffer.lock().unwrap();
+    for y in 0..SCREEN_HEIGHT {
+        for x in 0..SCREEN_WIDTH {
+            if framebuffer[x][y] {
+                print!("█"); // Character representing set pixel
+            } else {
+                print!(" "); // Character representing clear pixel
+            }
+        }
+        println!();
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+extern crate rand;
+extern crate rayon;
+extern crate sdl2;
+
+use std::sync::{Arc, Mutex};
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+use rand::Rng;
+use rayon::prelude::*;
+use sdl2::pixels::PixelFormatEnum;
+use sdl2::rect::Rect;
+use sdl2::event::Event;
+use sdl2::keyboard::Keycode;
+
+const SCREEN_WIDTH: usize = 64;
+const SCREEN_HEIGHT: usize = 32;
+const WINDOW_SCALE: u32 = 10;
+
+// GPU Command to set or clear a pixel
+#[derive(Clone, Copy)]
+struct GPUCommand {
+    x: usize,
+    y: usize,
+    set: bool,
+}
+
+// Framebuffer representing the Chip-8 screen
+type Framebuffer = [[bool; SCREEN_HEIGHT]; SCREEN_WIDTH];
+
+// Struct to manage GPU state, including framebuffer and command buffer
+struct Chip8GPU {
+    framebuffer: Arc<Mutex<Framebuffer>>,
+    command_buffer: Arc<Mutex<VecDeque<GPUCommand>>>, // Using VecDeque for FIFO
+}
+
+impl Chip8GPU {
+    fn new() -> Self {
+        Chip8GPU {
+            framebuffer: Arc::new(Mutex::new([[false; SCREEN_HEIGHT]; SCREEN_WIDTH])),
+            command_buffer: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    // Method to execute commands in parallel using Rayon
+    fn execute_commands(&self) {
+        let commands = self.command_buffer.lock().unwrap().clone();
+        self.command_buffer.lock().unwrap().clear();
+
+        // Execute commands in parallel
+        commands.into_par_iter().for_each(|command| {
+            if command.x < SCREEN_WIDTH && command.y < SCREEN_HEIGHT {
+                let mut framebuffer = self.framebuffer.lock().unwrap();
+                framebuffer[command.x][command.y] = command.set;
+            }
+        });
+    }
+
+    // Method to push a command to the buffer
+    fn push_command(&self, command: GPUCommand) {
+        self.command_buffer.lock().unwrap().push_back(command);
+    }
+}
+
+fn main() {
+    let sdl_context = sdl2::init().unwrap();
+    let video_subsystem = sdl_context.video().unwrap();
+    let window = video_subsystem.window("Chip-8 Emulator", (SCREEN_WIDTH as u32) * WINDOW_SCALE, (SCREEN_HEIGHT as u32) * WINDOW_SCALE)
+        .position_centered()
+        .build()
+        .unwrap();
+
+    let mut canvas = window.into_canvas().build().unwrap();
+    let texture_creator = canvas.texture_creator();
+    let mut texture = texture_creator.create_texture_streaming(PixelFormatEnum::RGB24, SCREEN_WIDTH as u32, SCREEN_HEIGHT as u32).unwrap();
+
+    let gpu = Arc::new(Chip8GPU::new());
+
+    // Pushing some random commands
+    for _ in 0..100 {
+        let rngx: u8 = rand::thread_rng().gen_range(0..64);
+        let rngy: u8 = rand::thread_rng().gen_range(0..32);
+
+        gpu.push_command(GPUCommand { x: rngx as usize, y: rngy as usize, set: true });
+    }
+
+    // Simulate CPU work before GPU execution
+    println!("CPU is preparing tasks before GPU execution...");
+    std::thread::sleep(Duration::from_millis(100)); // Simulate CPU work
+
+    // Execute commands
+    let timer = Instant::now();
+    gpu.execute_commands();
+    println!("Execution Time: {:?}ms", timer.elapsed().as_millis());
+
+    let framebuffer = gpu.framebuffer.lock().unwrap();
+    let mut event_pump = sdl_context.event_pump().unwrap();
+    'running: loop {
+        for event in event_pump.poll_iter() {
+            match event {
+                Event::Quit {..} |
+                Event::KeyDown { keycode: Some(Keycode::Escape), .. } => {
+                    break 'running;
+                },
+                _ => {}
+            }
+        }
+
+        canvas.set_draw_color(sdl2::pixels::Color::BLACK);
+        canvas.clear();
+        
+        texture.with_lock(None, |buffer: &mut [u8], pitch: usize| {
+            for y in 0..SCREEN_HEIGHT {
+                for x in 0..SCREEN_WIDTH {
+                    let offset = y * pitch + x * 3;
+                    if framebuffer[x][y] {
+                        buffer[offset] = 255;
+                        buffer[offset + 1] = 255;
+                        buffer[offset + 2] = 255;
+                    } else {
+                        buffer[offset] = 0;
+                        buffer[offset + 1] = 0;
+                        buffer[offset + 2] = 0;
+                    }
+                }
+            }
+        }).unwrap();
+
+        canvas.copy(&texture, None, Some(Rect::new(0, 0, (SCREEN_WIDTH as u32) * WINDOW_SCALE, (SCREEN_HEIGHT as u32) * WINDOW_SCALE))).unwrap();
+        canvas.present();
+    }
+}
